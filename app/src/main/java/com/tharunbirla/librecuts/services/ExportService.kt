@@ -13,9 +13,9 @@ import android.os.Environment
 import android.os.IBinder
 import android.provider.MediaStore
 import android.util.Log
-import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.arthenica.ffmpegkit.FFmpegKit
 import com.tharunbirla.librecuts.MainActivity
 import com.tharunbirla.librecuts.R
 import kotlinx.coroutines.CoroutineScope
@@ -27,7 +27,8 @@ import java.io.File
 class ExportService : Service() {
 
     private val TAG = "ExportService"
-    private val CHANNEL_ID = "ExportChannel"
+    private val CHANNEL_ID = "ExportChannel_Silent"
+    private val COMPLETION_CHANNEL_ID = "ExportCompletionChannel"
     private val NOTIFICATION_ID = 1001
 
     private val serviceJob = Job()
@@ -38,6 +39,7 @@ class ExportService : Service() {
         const val ACTION_EXPORT_PROGRESS = "com.tharunbirla.librecuts.ACTION_EXPORT_PROGRESS"
         const val ACTION_EXPORT_SUCCESS = "com.tharunbirla.librecuts.ACTION_EXPORT_SUCCESS"
         const val ACTION_EXPORT_FAILURE = "com.tharunbirla.librecuts.ACTION_EXPORT_FAILURE"
+        const val ACTION_CANCEL_EXPORT = "com.tharunbirla.librecuts.ACTION_CANCEL_EXPORT"
 
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
@@ -58,6 +60,16 @@ class ExportService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // التعامل مع زر الإلغاء Cancel
+        if (intent.action == ACTION_CANCEL_EXPORT) {
+            Log.d(TAG, "Cancel export requested by user")
+            FFmpegKit.cancel()
+            serviceJob.cancel()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -126,13 +138,26 @@ class ExportService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val manager = getSystemService(NotificationManager::class.java)
+            
+            // قناة صامتة تماماً لشريط التقدم لمنع صوت الجرس المتكرر
+            val progressChannel = NotificationChannel(
                 CHANNEL_ID,
-                "Video Export",
+                "Video Export Progress",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                setSound(null, null)
+                enableVibration(false)
+            }
+            manager.createNotificationChannel(progressChannel)
+
+            // قناة تنبيه واحدة فقط عند اكتمال التصدير
+            val completionChannel = NotificationChannel(
+                COMPLETION_CHANNEL_ID,
+                "Video Export Complete",
                 NotificationManager.IMPORTANCE_DEFAULT
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(completionChannel)
         }
     }
 
@@ -144,13 +169,24 @@ class ExportService : Service() {
             this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // زر الإلغاء Cancel داخل الإشعار
+        val cancelIntent = Intent(this, ExportService::class.java).apply {
+            action = ACTION_CANCEL_EXPORT
+        }
+        val cancelPendingIntent = PendingIntent.getService(
+            this, 1, cancelIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(if (progress > 0) "$progress%" else "Starting...")
             .setSmallIcon(R.drawable.ic_save_24)
             .setProgress(100, progress, progress == 0)
             .setContentIntent(pendingIntent)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelPendingIntent)
             .build()
     }
 
@@ -173,7 +209,7 @@ class ExportService : Service() {
             this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, COMPLETION_CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(message)
             .setSmallIcon(R.drawable.ic_check_24)
